@@ -1,0 +1,5 @@
+# Adds the memory panel and its sidebar entry. Does not disable or replace any
+# shipped row.
+- insert:
+    - id: memory
+      name: dsh-plugin-memory
