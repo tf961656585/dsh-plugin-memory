@@ -20,11 +20,14 @@ const RECALL_LIMIT = 8
 const PROMPT = [
   '## 记忆（memory）',
   '项目根目录的 `memory/` 是可探索的经验记忆，不是权威 spec。用下面的工具读写，不要直接编辑 `memory/` 下的文件。',
-  '- 开工、排查异常、改不熟悉模块、用户提到「之前 / 以前」时：先用 `memory_recall`，查询用文件路径、符号、报错串、模块名或用户措辞。',
+  '- 开工、排查异常、改不熟悉模块、用户提到「之前 / 以前」时：先用 `memory_recall`，查询用文件路径、符号、报错串、模块名或用户措辞；两三个字的短词命中很弱，尽量给短语或场景。',
   '- 命中后先 `memory_get` 读全文，按「失效条件」核验现状再据此行动；记忆与代码 / spec 冲突时以代码和 spec 为准。',
+  '- 读完确认仍成立时用 `memory_verify` 记下核验日期（只写日期、不改内容）；发现矛盾用 `memory_stale` 标记。',
   '- 发现记忆与现状矛盾：用 `memory_stale` action=mark 记下失效证据；不要继续把它当依据，也不要直接删。',
   '- 本轮得到可复用教训（用户纠正、隐藏依赖、拍板决策）：用 `memory_write` action=add，必须带触发、证据、失效条件；已写进 AGENTS.md / spec / skill 的不重复存。',
+  '- 检索漏检、判断是同一说法的两种写法时，用 `memory_lexicon` action=add 补一条（必须带漏检原句）；词表不要手改。收窄或删除映射只允许在 `/reflect` 里用 action=remove 做，并补一条决策记忆。',
   '- 用户说「反思 / 沉淀 / 复盘」或执行 `/reflect`：做完整一轮——`memory_audit` → 逐条核验 → `memory_stale` 处理队列 → 补写本轮洞察 → 对 AGENTS / spec 的改动只用 `memory_propose` 出提案。',
+  '- 用户批准提案且改动已落地后：用 `memory_propose` action=resolve 标为已应用，evidence 必须写用户批准的原话；不要让它一直显示待确认。',
   '- 自动召回会以「〔记忆召回〕」出现在你的输入里；它只是线索，同样要按失效条件核验。',
   '- 删条目只在核验失效后做，并在 `memory_write` action=delete 里写清 reason。',
 ].join('\n')
@@ -81,6 +84,11 @@ function textOfMessages(messages) {
   const parts = []
   for (const message of Array.isArray(messages) ? messages : []) {
     if (message?.role !== 'user') continue
+    // Plugin-generated prompts (recall notices, /reflect instructions, time
+    // snapshots, instruction pastes) share the user role but are not the task.
+    // Using them as the query recalled entries on list numbers and file names.
+    const kind = message.source?.kind
+    if (kind !== undefined && kind !== 'user') continue
     for (const block of Array.isArray(message.content) ? message.content : []) {
       if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
     }
@@ -97,7 +105,7 @@ function formatEntry(entry, full = false) {
   const lines = [
     `[${entry.type}] ${entry.title}`,
     `地址：${entry.file}#${entry.id}`,
-    `作用域：${entry.scope}  捕获于：${entry.date}${entry.stale ? '  [待核验]' : ''}`,
+    `作用域：${entry.scope}  捕获于：${entry.date}${entry.verified ? `  核验于：${entry.verified}` : ''}${entry.stale ? '  [待核验]' : ''}`,
   ]
   if (entry.hook !== '') lines.push(`钩子：${entry.hook}`)
   if (entry.trigger !== '') lines.push(`触发：${entry.trigger}`)
@@ -114,9 +122,14 @@ function formatRecall(hits) {
   if (hits.length === 0) {
     return '没有命中记忆。可以换一个文件路径、报错串或模块名重试；查询为空时返回最近的条目。'
   }
-  const lines = [`命中 ${hits.length} 条记忆（先按失效条件核验，再据此行动）：`]
+  const short = hits[0].short === true
+  const lines = [short
+    ? `命中 ${hits.length} 条记忆（查询较短，按标题/正文词面匹配，只作线索；建议再加模块名或场景词）：`
+    : `命中 ${hits.length} 条记忆（先按失效条件核验，再据此行动）：`]
   for (const hit of hits) {
-    lines.push(`- [${hit.entry.type}] ${hit.entry.hook || hit.entry.trigger} → ${hit.entry.file}#${hit.entry.id}（相关度 ${hit.score}）${hit.entry.stale ? ' [待核验]' : ''}`)
+    const matched = Array.isArray(hit.matched) && hit.matched.length > 0 ? `，命中词 ${hit.matched.join('/')}` : ''
+    const verified = hit.entry.verified ? `｜核验 ${hit.entry.verified}` : ''
+    lines.push(`- [${hit.entry.type}] ${hit.entry.hook || hit.entry.trigger} → ${hit.entry.file}#${hit.entry.id}（相关度 ${Math.round(hit.score)}${matched}）${verified}${hit.entry.stale ? ' [待核验]' : ''}`)
     lines.push(`  内容：${truncate(hit.entry.content, 300)}`)
     lines.push(`  失效条件：${truncate(hit.entry.invalidation, 160)}`)
   }
@@ -124,10 +137,12 @@ function formatRecall(hits) {
 }
 
 function formatAudit(audit) {
+  const lexicon = audit.lexicon ?? { groups: 0, aliases: 0, risky: 0 }
   const lines = [
     `记忆体检：${audit.counts.entries} 条（user ${audit.counts.user}），待清理 ${audit.counts.stale}，待补 ${audit.counts.inbox}，提案 ${audit.counts.proposals}。`,
     audit.certified ? '格式标记：已认证。' : `格式标记：${audit.schema === null ? '缺失' : `版本 ${audit.schema}，当前 ${SCHEMA_VERSION}`}。`,
     audit.indexSync ? '索引：与条目一致。' : '索引：与条目不一致，需要重建。',
+    `词表：${lexicon.groups} 组 / ${lexicon.aliases} 个别名${lexicon.risky > 0 ? `；${lexicon.risky} 条映射会把不含规范词的条目并到同一词` : '；没有高风险映射'}。`,
   ]
   if (audit.issues.length === 0) {
     lines.push('没有发现形状或索引问题。语义失效仍需逐条读代码核验。')
@@ -138,6 +153,67 @@ function formatAudit(audit) {
     lines.push(`- [${issue.level}] ${issue.message}`)
   }
   if (audit.issues.length > 40) lines.push(`…还有 ${audit.issues.length - 40} 条，请在记忆面板「体检」里查看。`)
+  return lines.join('\n')
+}
+
+function formatLexiconList(report) {
+  if (!report.exists) return '当前项目还没有 memory/；先写入一条记忆。'
+  const lines = [`词表：${report.groups.length} 组 / ${report.aliases} 个别名。`]
+  if (report.risky.length > 0) {
+    lines.push(`⚠ ${report.risky.length} 条映射会把不含规范词的条目并到同一词（相关≠同义，到 /reflect 复核）：`)
+    for (const item of report.risky.slice(0, 8)) {
+      lines.push(`- ${item.canonical} ← ${item.term}（影响 ${item.affected} 条：${item.sample.join('、')}）`)
+    }
+    if (report.risky.length > 8) lines.push(`…还有 ${report.risky.length - 8} 条`)
+  } else {
+    lines.push('没有高风险映射。')
+  }
+  for (const group of report.groups) {
+    const terms = group.aliases
+      .map((alias) => (alias.affected > 0 ? `${alias.term}(${alias.affected})` : alias.term))
+      .join('、') || '（无别名）'
+    lines.push(`- ${group.canonical} → ${terms}（规范词命中 ${group.entries} 条）`)
+  }
+  if (report.issues.length > 0) {
+    lines.push(`格式问题 ${report.issues.length} 条：`)
+    for (const issue of report.issues.slice(0, 10)) lines.push(`- [${issue.level}] ${issue.message}`)
+  }
+  return lines.join('\n')
+}
+
+function formatLexiconAdd(result) {
+  if (result.added.length === 0) return result.message ?? '词表没有改动。'
+  const lines = [
+    `已加入词表：${result.added.join('、')} → ${result.canonical}${result.created ? '（新建组）' : ''}${result.forced ? '（强改）' : ''}。`,
+    `改前查「${result.evidence}」：${result.before.join('、') || '0 命中'}`,
+    `改后查「${result.evidence}」：${result.after.join('、') || '0 命中'}`,
+  ]
+  if (result.affected.length > 0) {
+    lines.push(`注意：这个别名还出现在 ${result.affected.length} 条不含「${result.canonical}」的条目里（${result.affected.slice(0, 3).join('、')}），到 /reflect 复核是否收窄。`)
+  }
+  lines.push(`词表现在 ${result.groups} 组。`)
+  return lines.join('\n')
+}
+
+function formatLexiconRemove(result) {
+  return [
+    `已从「${result.canonical}」删掉别名「${result.alias}」${result.droppedGroup ? '（该组已空，整行删除）' : ''}。`,
+    `依据：${result.reason}`,
+    `该别名此前会把 ${result.affected.length} 条不含规范词的条目一并改写${result.affected.length > 0 ? `（${result.affected.slice(0, 3).join('、')}）` : ''}。`,
+    `词表现在 ${result.groups} 组。`,
+    '记得用 memory_write 写一条决策记忆（收窄原因与证据）。',
+  ].join('\n')
+}
+
+function formatLexiconCheck(rows) {
+  if (rows.length === 0) return 'check 需要 queries：一条或多条要验证的查询。'
+  const lines = []
+  for (const row of rows) {
+    lines.push(`「${row.query}」→ 归一为「${row.normalized}」`)
+    lines.push(row.hits.length === 0
+      ? '  0 命中'
+      : `  ${row.hits.map((hit) => `${hit.ref}（${hit.score}）`).join('、')}`)
+  }
   return lines.join('\n')
 }
 
@@ -158,7 +234,7 @@ function buildTools(store) {
   return [
     {
       name: 'memory_recall',
-      description: '按文件路径、符号、报错串、模块名或用户措辞检索当前项目的经验记忆；查询为空时浏览最近条目。返回摘要与 file#id，读全文用 memory_get。',
+      description: '按文件路径、符号、报错串、模块名或用户措辞检索当前项目的经验记忆（标题、正文、证据都参与匹配，项目词表会把口语映射到库里的写法）；查询为空时浏览最近条目。返回摘要、命中词与 file#id，读全文用 memory_get。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -182,10 +258,10 @@ function buildTools(store) {
         const limit = Math.max(1, Math.min(20, rawLimit))
         const query = typeof args.query === 'string' ? args.query : ''
         if (query.trim() === '') {
-          const recent = rankEntries(entries, '', limit).map((result) => ({ ...result, entry: publicEntry(result.entry) }))
+          const recent = rankEntries(entries, '', limit, false, loaded.lexicon).map((result) => ({ ...result, entry: publicEntry(result.entry) }))
           return formatRecall(recent)
         }
-        const hits = rankEntries(entries, query, limit).map((result) => ({ ...result, entry: publicEntry(result.entry) }))
+        const hits = rankEntries(entries, query, limit, false, loaded.lexicon).map((result) => ({ ...result, entry: publicEntry(result.entry) }))
         return formatRecall(hits)
       },
     },
@@ -210,7 +286,7 @@ function buildTools(store) {
     },
     {
       name: 'memory_write',
-      description: '写入一条记忆：add 新增，update 修改，delete 删除。写入前由插件校验字段并自动重建索引；已写进 AGENTS.md / spec / skill 的内容不要再存。',
+      description: '写入一条记忆：add 新增，update 修改，delete 删除。update 只传要改的字段，其余字段保持不变；id 可写条目 id 或 文件#id。写入前由插件校验字段并自动重建索引；已写进 AGENTS.md / spec / skill 的内容不要再存。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -233,22 +309,42 @@ function buildTools(store) {
       output: stringOutput,
       execute: async (args, exec) => {
         const root = toolRoot(store, exec)
-        if (args.action === 'add') {
+        const { action, ...patch } = args
+        if (action === 'add') {
           const entry = await store.add(root, args)
           return `已写入 ${entry.file}#${entry.id}：${entry.title}\n索引已重建。`
         }
-        if (args.action === 'update') {
+        if (action === 'update') {
           if (typeof args.id !== 'string' || args.id.trim() === '') return 'update 需要 id（或 file#id）。'
-          const entry = await store.update(root, args.id, args)
+          const entry = await store.update(root, args.id, patch)
           return `已更新 ${entry.file}#${entry.id}：${entry.title}\n索引已重建。`
         }
-        if (args.action === 'delete') {
+        if (action === 'delete') {
           if (typeof args.id !== 'string' || args.id.trim() === '') return 'delete 需要 id（或 file#id）。'
           if (typeof args.reason !== 'string' || oneLine(args.reason) === '') return 'delete 需要 reason：写清核验到的失效证据。'
           const removed = await store.remove(root, args.id)
           return `已删除 ${removed.file}#${removed.id}：${removed.title}；索引已重建。`
         }
         return '未知操作，只支持 add / update / delete。'
+      },
+    },
+    {
+      name: 'memory_verify',
+      description: '把一条记忆标记为「今天核验过仍成立」：只写核验日期，不修改内容。读完条目、按失效条件对照现状确认仍成立后调用。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', description: '条目 id，或 file#id。' },
+        },
+        required: ['id'],
+      },
+      output: stringOutput,
+      execute: async (args, exec) => {
+        const root = toolRoot(store, exec)
+        if (typeof args.id !== 'string' || args.id.trim() === '') return 'memory_verify 需要 id（或 file#id）。'
+        const result = await store.verify(root, args.id)
+        return `已核验 ${result.file}#${result.id}（${result.verified}）：${result.title}`
       },
     },
     {
@@ -293,26 +389,87 @@ function buildTools(store) {
       },
     },
     {
-      name: 'memory_propose',
-      description: '对 AGENTS.md、spec 或 skill 的改写出提案，不直接修改目标文件；提案写入 memory/proposals/，在记忆面板「提案」里审阅。',
+      name: 'memory_lexicon',
+      description: '维护当前项目的检索词表（口语说法 ↔ 库里已有的写法）。list 看每组与每个别名的风险读数；add 补一条同义映射（干活时自主可用，必须带漏检原句）；remove 收窄或删除映射（只允许在 /reflect 反思阶段，必须带理由）；check 用几条查询验证归一与命中。不要手改 memory/lexicon.md。',
       parameters: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          title: { type: 'string', description: '提案一句话。' },
-          target: { type: 'string', description: '目标文件。' },
-          change: { type: 'string', description: '新增规则 / 修正矛盾 / 删除旧口径。' },
-          rationale: { type: 'string', description: '为什么该进必读层，而不是记忆层。' },
-          evidence: { type: 'string', description: '本轮证据。' },
-          diff: { type: 'string', description: '建议 diff 内容。' },
+          action: { type: 'string', enum: ['list', 'add', 'remove', 'check'], description: 'list 查看；add 补别名；remove 收窄/删除；check 验证查询。' },
+          canonical: { type: 'string', description: 'add / remove 必填：库里实际在用的写法（规范词）。' },
+          aliases: { type: 'array', items: { type: 'string' }, description: 'add 必填：别人会怎么说；只放同义词，不放相关词。' },
+          evidence: { type: 'string', description: 'add 必填：触发这次补充的漏检原句。' },
+          alias: { type: 'string', description: 'remove 必填：要收窄或删除的那条说法。' },
+          reason: { type: 'string', description: 'remove 必填：这条映射造成的问题与证据；add 的强改也必填。' },
+          force: { type: 'boolean', description: 'add 超过风险上限时显式强改；只允许在 /reflect 里用，且必须带 reason。' },
+          queries: { type: 'array', items: { type: 'string' }, description: 'check：要验证的查询，可多条。' },
         },
-        required: ['title', 'target', 'change', 'rationale'],
+        required: ['action'],
       },
       output: stringOutput,
       execute: async (args, exec) => {
         const root = toolRoot(store, exec)
+        if (args.action === 'list') return formatLexiconList(store.lexiconReport(root))
+        if (args.action === 'add') {
+          try {
+            return formatLexiconAdd(await store.lexiconAdd(root, args))
+          } catch (error) {
+            return `词表没有改动：${error.message}`
+          }
+        }
+        if (args.action === 'remove') {
+          try {
+            return formatLexiconRemove(await store.lexiconRemove(root, args))
+          } catch (error) {
+            return `词表没有改动：${error.message}`
+          }
+        }
+        if (args.action === 'check') {
+          const queries = Array.isArray(args.queries)
+            ? args.queries
+            : (typeof args.evidence === 'string' ? [args.evidence] : [])
+          return formatLexiconCheck(store.lexiconCheck(root, queries))
+        }
+        return '未知操作，只支持 list / add / remove / check。'
+      },
+    },
+    {
+      name: 'memory_propose',
+      description: '对 AGENTS.md、spec 或 skill 的改动出提案（action=propose，默认），或在用户批准且改动已落地后把一份提案标为已应用（action=resolve，必须写批准依据）。提案一条一文件，写在 memory/proposals/，在记忆面板「提案」里审阅。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['propose', 'resolve'], description: 'propose 出提案（默认）；resolve 标已应用。' },
+          proposal: { type: 'string', description: 'resolve 必填：提案文件名，如 2026-11-13-2.md（见索引或面板）。' },
+          title: { type: 'string', description: '提案一句话。' },
+          target: { type: 'string', description: '目标文件。' },
+          change: { type: 'string', description: '新增规则 / 修正矛盾 / 删除旧口径。' },
+          rationale: { type: 'string', description: '为什么该进必读层，而不是记忆层。' },
+          evidence: { type: 'string', description: 'propose：本轮证据；resolve：用户批准的原话（必填）。' },
+          diff: { type: 'string', description: '建议 diff 内容。' },
+        },
+        required: [],
+      },
+      output: stringOutput,
+      execute: async (args, exec) => {
+        const root = toolRoot(store, exec)
+        if (args.action === 'resolve') {
+          if (typeof args.proposal !== 'string' || args.proposal.trim() === '') {
+            return 'resolve 需要 proposal：提案文件名，如 2026-11-13-2.md。'
+          }
+          if (typeof args.evidence !== 'string' || oneLine(args.evidence) === '') {
+            return 'resolve 需要 evidence：用户批准的原话（这是唯一的批准记录）。'
+          }
+          try {
+            const closed = await store.resolveProposal(root, args.proposal, args.evidence)
+            return `已标记已应用 ${closed.file}（${closed.approvedAt}）：${closed.title}\n请确认目标文件确实已经改好。`
+          } catch (error) {
+            return `没有标记：${error.message}`
+          }
+        }
         const result = await store.propose(root, args)
-        return `已写提案 ${result.file}（目标：${result.target}）。请在记忆面板「提案」里审阅；确认后再改目标文件。`
+        return `已写提案 ${result.file}（目标：${result.target}）。请在记忆面板「提案」里审阅；确认并改完目标文件后，用 action=resolve 标已应用。`
       },
     },
   ]
@@ -473,9 +630,10 @@ export function apply(ctx, config = {}) {
           '请对本次会话做一次完整反思沉淀（/reflect）。',
           '1. 用 memory_audit 查看当前项目记忆库状态；',
           '2. 逐条核验可能失效的条目，用 memory_stale 标记或处理；',
-          '3. 补写本轮值得跨会话保留的洞察（memory_write action=add，带触发、证据、失效条件）；',
-          '4. 只对 AGENTS.md、spec 或 skill 的改动用 memory_propose 出提案，不要直接改。',
-          '最后用一句话汇报：新增、更新、删除、提案各几条。',
+          '3. 词表体检：memory_lexicon action=list 看风险读数，对把不同概念并到一组的映射用 action=remove 收窄（并写一条决策记忆），再补写本轮真实漏检的同义写法；',
+          '4. 补写本轮值得跨会话保留的洞察（memory_write action=add，带触发、证据、失效条件）；',
+          '5. 只对 AGENTS.md、spec 或 skill 的改动用 memory_propose 出提案，不要直接改；用户已批准且改动落地的提案，用 action=resolve 标为已应用（写批准原话）。',
+          '最后用一句话汇报：新增、更新、删除、提案各几条，以及词表 +N/-M。',
         ]
         if (focus !== '') lines.push(`本轮重点：${focus}`)
         try {

@@ -1,0 +1,48 @@
+{
+  "positives": [
+    { "q": "技能打不中敌人", "ids": ["pit-hit-verification"] },
+    { "q": "为什么技能没生效", "ids": ["pit-hit-verification"] },
+    { "q": "地图看起来不对怎么修", "ids": ["map-natural-shape"] },
+    { "q": "新增一个技能图标", "ids": ["dec-asset-route-l2-l3"] },
+    { "q": "改碰撞层要同步哪些地方", "ids": ["dep-collision-layer-registration"] },
+    { "q": "攻击源命中判定", "ids": ["pit-hit-verification"] },
+    { "q": "撤离窗口时间对不上", "ids": ["world-pacing-doc-drift"] },
+    { "q": "碰撞高度判定", "ids": ["dec-body-hit-vs-full-2p5d"] },
+    { "q": "check:spec-refs 报错", "ids": ["spec-refs-dimension-line", "gate-commands-cwd", "spec-refs-parent-dir-false-green"] },
+    { "q": "碰撞编辑器改高度不生效", "ids": ["pit-volume-only-collision-override"] },
+    { "q": "新增内置碰撞层", "ids": ["dep-collision-layer-registration"] },
+    { "q": "范围圈素材", "ids": ["range-skin-direction-2026-11"] },
+    { "q": "Boss 出场持续掉血", "ids": ["pit-boss-area-damage-not-collision"] },
+    { "q": "透视下地面圆不贴地", "ids": ["dep-range-circle-persp"] },
+    { "q": "升级面板技能名", "ids": ["skill-name-refactor-2026-11"] },
+    { "q": "meta.yaml 的提示词怎么写", "ids": ["pit-legacy-21"] },
+    { "q": "玩家受击体高度", "ids": ["fact-body-hit-validation-path"] },
+    { "q": "枪械 升级", "ids": ["fact-legacy-12"] },
+    { "q": "贴图 带出", "ids": ["world-pacing-doc-drift"] }
+  ],
+  "negatives": [
+    "今天天气怎么样",
+    "帮我写一份周报",
+    "中午吃什么",
+    "给我讲个笑话",
+    "明天开会吗",
+    "把这张图裁成头像",
+    "怎么提高英语口语",
+    "这个页面配色好看吗"
+  ],
+  "autoNoise": [
+    "不做任何编辑改写",
+    "在这个项目里测试一下 dsh memory 插件能否正常工作，不做任何编辑改写",
+    "一切正常",
+    "不要做任何修改",
+    "暂时不要动任何文件"
+  ],
+  "auto": [
+    "我改了资产加载那条链路，页面加载完没问题，但是美术图好像没更新，帮我看看",
+    "刚才那个碰撞编辑器保存之后高度不生效，是不是又要改资产条目",
+    "我想做一批技能图标，走 AI 还是手画 SVG，你有之前定的路线吗",
+    "地图看起来太平了，是不是要换形状载体，这个之前讨论过吧",
+    "Boss 出来之后玩家一直掉血，我看碰撞编辑器里没有相关配置，怎么回事",
+    "帮我写个周报，把今天做的三件事列出来就行"
+  ]
+}

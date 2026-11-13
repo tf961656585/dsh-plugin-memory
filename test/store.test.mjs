@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { MemoryStore } from '../lib/store.js'
@@ -136,4 +136,128 @@ test('certify rebuilds a drifted index', async () => {
   assert.equal(store.snapshot(root).index.sync, false)
   await store.certify(root)
   assert.equal(store.snapshot(root).index.sync, true)
+})
+
+test('verify stamps a date and the index shows its age', async () => {
+  const root = workspace()
+  const store = new MemoryStore(fakeContext())
+  const entry = await store.add(root, {
+    title: '一条记忆',
+    type: '踩坑',
+    trigger: '改 src/foo.ts 时',
+    evidence: 'src/foo.ts:1',
+    invalidation: '不再改',
+    content: '内容',
+  })
+  const result = await store.verify(root, `${entry.file}#${entry.id}`)
+  assert.match(result.verified, /^\d{4}-\d{2}-\d{2}$/)
+  const snapshot = store.snapshot(root)
+  assert.equal(snapshot.entries[0].verified, result.verified)
+  assert.equal(snapshot.index.sync, true)
+  const index = readFileSync(path.join(root, 'memory', 'MEMORY.md'), 'utf8')
+  assert.match(index, new RegExp(`｜核验 ${result.verified}`))
+})
+
+test('keeping a stale entry records that it was re-verified', async () => {
+  const root = workspace()
+  const store = new MemoryStore(fakeContext())
+  const entry = await store.add(root, {
+    title: '一条记忆',
+    type: '踩坑',
+    trigger: '改 src/foo.ts 时',
+    evidence: 'src/foo.ts:1',
+    invalidation: '不再改',
+    content: '内容',
+  })
+  await store.markStale(root, `${entry.file}#${entry.id}`, '疑似失效')
+  await store.resolveStale(root, `${entry.file}#${entry.id}`, 'keep')
+  const snapshot = store.snapshot(root)
+  assert.match(snapshot.entries[0].verified, /^\d{4}-\d{2}-\d{2}$/)
+  assert.equal(snapshot.counts.stale, 0)
+})
+
+test('proposals are one file each and resolve with approval evidence', async () => {
+  const root = workspace()
+  const store = new MemoryStore(fakeContext())
+  const base = {
+    target: 'AGENTS.md',
+    change: '新增规则',
+    rationale: '跨项目稳定偏好',
+    evidence: '本轮依据',
+  }
+  const first = await store.propose(root, { ...base, title: '第一条' })
+  const second = await store.propose(root, { ...base, title: '第二条' })
+  assert.match(first.file, /^proposals\/\d{4}-\d{2}-\d{2}\.md$/)
+  assert.match(second.file, /-2\.md$/)
+  assert.equal(store.snapshot(root).counts.proposals, 2)
+
+  const closed = await store.resolveProposal(root, second.file, '用户说：提案通过')
+  assert.match(closed.approvedAt, /^\d{4}-\d{2}-\d{2}$/)
+  const snapshot = store.snapshot(root)
+  assert.equal(snapshot.counts.proposals, 1)
+  assert.equal(snapshot.proposals.find((item) => `proposals/${item.file}` === second.file).status, '已应用')
+  assert.equal(snapshot.proposals.find((item) => `proposals/${item.file}` === second.file).approval, '用户说：提案通过')
+  assert.equal(store.audit(root).issues.filter((issue) => issue.code === 'proposal-orphan').length, 0)
+  await assert.rejects(() => store.resolveProposal(root, second.file, '再一次'))
+
+  await store.removeProposal(root, first.file)
+  assert.equal(store.snapshot(root).counts.proposals, 0)
+})
+
+test('legacy multi-section proposal files are reported for splitting', async () => {
+  const root = workspace()
+  const store = new MemoryStore(fakeContext())
+  await store.propose(root, {
+    title: '第一条',
+    target: 'AGENTS.md',
+    change: '新增规则',
+    rationale: '理由',
+    evidence: '依据',
+  })
+  const file = path.join(root, 'memory', 'proposals', readdirSync(path.join(root, 'memory', 'proposals'))[0])
+  const legacy = `${readFileSync(file, 'utf8').trimEnd()}\n\n## 提案 2 — 第二条\n- 目标文件: AGENTS.md\n- 改动类型: 新增规则\n- 依据: 依据\n- 理由: 理由\n- 状态: 待确认\n`
+  writeFileSync(file, legacy)
+  const audit = store.audit(root)
+  assert.ok(audit.issues.some((issue) => issue.code === 'proposal-legacy'))
+})
+
+test('evidence short paths are completed when unique and refused when ambiguous', async () => {
+  const root = workspace()
+  mkdirSync(path.join(root, 'src', 'deep'), { recursive: true })
+  writeFileSync(path.join(root, 'src', 'deep', 'bar.ts'), 'export const bar = 2\n')
+  mkdirSync(path.join(root, 'a', 'pkg'), { recursive: true })
+  mkdirSync(path.join(root, 'b', 'pkg'), { recursive: true })
+  writeFileSync(path.join(root, 'a', 'pkg', 'x.ts'), 'export const a = 1\n')
+  writeFileSync(path.join(root, 'b', 'pkg', 'x.ts'), 'export const b = 1\n')
+  const store = new MemoryStore(fakeContext())
+
+  const entry = await store.add(root, {
+    title: '唯一后缀',
+    type: '隐藏依赖',
+    trigger: '改 bar.ts 时',
+    evidence: 'deep/bar.ts:3',
+    invalidation: '改结构',
+    content: '内容',
+  })
+  assert.equal(store.find(root, `${entry.file}#${entry.id}`).evidence, 'src/deep/bar.ts:3')
+
+  await assert.rejects(() => store.add(root, {
+    title: '歧义后缀',
+    type: '隐藏依赖',
+    trigger: '改 x.ts 时',
+    evidence: 'pkg/x.ts:1',
+    invalidation: '改结构',
+    content: '内容',
+  }), /证据路径不唯一/)
+
+  const missing = await store.add(root, {
+    title: '找不到的路径',
+    type: '隐藏依赖',
+    trigger: '改 missing 时',
+    evidence: 'missing/thing.ts:1',
+    invalidation: '路径出现后',
+    content: '内容',
+  })
+  assert.equal(store.find(root, `${missing.file}#${missing.id}`).evidence, 'missing/thing.ts:1')
+  assert.ok(store.audit(root).issues.some((issue) => issue.code === 'evidence-missing'))
 })
