@@ -1,8 +1,12 @@
 {
   "name": "dsh-plugin-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tf961656585/dsh-plugin-memory.git"
+  },
   "type": "module",
   "description": "Repository memory for DSH: automatic recall, reflective writes, visual management, and stale-entry audits.",
   "icon": "./icon.svg",

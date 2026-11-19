@@ -9,6 +9,9 @@ with an always-available capability:
 - the plugin recalls strongly related entries automatically at the start of a turn
   when the match lands on an entry's trigger surface (title, hook, or trigger);
 - a sidebar panel manages entries, stale reports, proposals, and audits visually;
+- every turn that wrote, verified, deleted, or proposed memory leaves one line at
+  the end of the conversation: a single proposal is named inline, and a click
+  opens the memory page. Reading memory leaves no line;
 - `/reflect` still performs a deliberate full reflection pass when the user asks.
 
 ## Storage contract

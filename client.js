@@ -13,6 +13,10 @@ window.__ModuleLoader__.load({
 
     const NS = 'memory'
     const PANEL_ID = 'memory'
+    /** Turn data key for the end-of-turn receipt; one row per Turn that touched memory. */
+    const RECEIPT_KEY = 'memory-turn'
+    /** The receipt lists at most this many entries before summarizing the rest. */
+    const RECEIPT_LIMIT = 6
     const ROUTE_STATE = '/plugin/memory/state'
     const ROUTE_MUTATE = '/plugin/memory/mutate'
     const PROJECT_KEY = 'memory:project'
@@ -134,6 +138,18 @@ window.__ModuleLoader__.load({
       deleteEntryBody: '确认删除这条记忆？删除后不可撤销。',
       staleMarked: '已加入待清理',
       auditNeedsRun: '还没有运行体检。',
+      panelFailed: '记忆面板这块没能显示出来。刷新页面多半能恢复；如果还不行，展开开发者工具看控制台里的报错。',
+      receiptLabel: '记忆',
+      receiptProposal: '提案',
+      receiptProposals: '{n} 份提案等你批准',
+      receiptWrote: '写入 {n} 条',
+      receiptUpdated: '更新 {n} 条',
+      receiptVerified: '核验 {n} 条',
+      receiptDeleted: '删除 {n} 条',
+      receiptStale: '标记 {n} 条失效',
+      receiptApplied: '应用 {n} 份提案',
+      receiptMore: '还有 {n} 条',
+      receiptOpen: '打开记忆',
     }
 
     const en = {
@@ -245,6 +261,18 @@ window.__ModuleLoader__.load({
       deleteEntryBody: 'Delete this memory? This cannot be undone.',
       staleMarked: 'Added to the stale queue',
       auditNeedsRun: 'No audit has run yet.',
+      panelFailed: 'This part of the memory panel could not render. A refresh usually restores it; if not, check the console for the error.',
+      receiptLabel: 'Memory',
+      receiptProposal: 'Proposal',
+      receiptProposals: '{n} proposals waiting for you',
+      receiptWrote: '{n} memories written',
+      receiptUpdated: '{n} updated',
+      receiptVerified: '{n} verified',
+      receiptDeleted: '{n} deleted',
+      receiptStale: '{n} marked stale',
+      receiptApplied: '{n} proposals applied',
+      receiptMore: '{n} more',
+      receiptOpen: 'Open memory',
     }
 
     const CSS = `
@@ -327,6 +355,35 @@ window.__ModuleLoader__.load({
 .mem-search{max-width:none}
 .mem-head-row{flex-wrap:wrap}
 }
+`
+
+    /**
+     * Receipt styles ride the row itself, not the memory page: the receipt renders
+     * in the chat flow while the page is closed. Theme tokens only, so light and
+     * dark both follow the host.
+     */
+    const MEM_RECEIPT_CSS = `
+.mem-receipt{display:flex;flex-direction:column;gap:2px;margin:12px 0 2px}
+.mem-receipt-head{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:4px 8px;margin:0;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:18px;text-align:left;cursor:pointer}
+.mem-receipt-head:hover{background:var(--dsw-alias-bg-layer-1);border-color:var(--dsw-alias-border-l2)}
+.mem-receipt-head:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
+.mem-receipt-label{flex:none;font-weight:600}
+.mem-receipt-attention .mem-receipt-label{color:var(--dsw-alias-label-primary)}
+.mem-receipt-summary{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mem-receipt-attention .mem-receipt-summary{color:var(--dsw-alias-label-primary)}
+.mem-receipt-chevron{flex:none;font-size:10px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.mem-receipt-kind{flex:none;padding:0 6px;border:1px solid currentColor;border-radius:999px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+.mem-receipt-kind-proposal{color:var(--dsw-alias-state-warn-primary)}
+.mem-receipt-list{display:flex;flex-direction:column;gap:2px;padding:0 0 2px 8px}
+.mem-receipt-item{display:flex;align-items:center;gap:7px;width:100%;box-sizing:border-box;padding:4px 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:18px;text-align:left;cursor:pointer}
+.mem-receipt-item:hover{background:var(--dsw-alias-bg-layer-1)}
+.mem-receipt-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
+.mem-receipt-item-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mem-receipt-item-go{flex:none;color:var(--dsw-alias-label-secondary)}
+.mem-receipt-more{padding:2px 8px 0;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+.mem-receipt-open{align-self:flex-start;padding:3px 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-brand-primary);font:inherit;font-size:12px;line-height:18px;cursor:pointer}
+.mem-receipt-open:hover{text-decoration:underline;text-underline-offset:2px}
+.mem-receipt-open:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 `
 
     function formatText(t, key, vars) {
@@ -632,6 +689,9 @@ window.__ModuleLoader__.load({
     function StaleRow({ t, record, busy, onResolve }) {
       const [confirming, setConfirming] = React.useState(false)
       const entry = record.entry
+      // The row's own busy token; StaleList only uses this key for React identity,
+      // so the row must recompute it rather than close over the map callback's.
+      const key = `${record.file}#${record.id}`
       return h(
         'article',
         { className: 'mem-card' },
@@ -764,6 +824,32 @@ window.__ModuleLoader__.load({
             )),
         ),
       )
+    }
+
+    /**
+     * Contain a render failure to this panel: one bad row must not blank the
+     * whole window. The message stays actionable (refresh + console detail).
+     */
+    class PanelBoundary extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { failed: false }
+      }
+
+      static getDerivedStateFromError() {
+        return { failed: true }
+      }
+
+      componentDidCatch(error) {
+        console.error('memory: panel render failed:', error)
+      }
+
+      render() {
+        if (this.state.failed === true) {
+          return h('div', { className: 'mem-page' }, h('div', { className: 'mem-center' }, this.props.message))
+        }
+        return this.props.children
+      }
     }
 
     function MemoryPage({ t }) {
@@ -1088,17 +1174,231 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** Parse one model-produced argument object; malformed calls contribute nothing. */
+    function parsedArguments(raw) {
+      if (typeof raw !== 'string') return null
+      try {
+        const value = JSON.parse(raw)
+        return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null
+      } catch {
+        return null
+      }
+    }
+
+    /** Concatenated text of one tool result; only this plugin's own tools write here. */
+    function resultText(message) {
+      if (message === null || typeof message !== 'object' || !Array.isArray(message.content)) return ''
+      let text = ''
+      for (const block of message.content) {
+        if (block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string') {
+          text += `${block.text}\n`
+        }
+      }
+      return text
+    }
+
+    /** Proposal file one settled `memory_propose` names, so a same-Turn approval can pair. */
+    function proposalFile(message) {
+      const match = /已写提案\s+([^\s（(]+\.md)/.exec(resultText(message))
+      return match === null ? '' : match[1]
+    }
+
+    /** Two proposal spellings name one file when their last path segments agree. */
+    function sameProposal(file, proposal) {
+      if (file === '' || proposal === '') return false
+      const left = file.split('/').filter(Boolean).pop() ?? ''
+      const right = proposal.split('/').filter(Boolean).pop() ?? ''
+      return left === right
+    }
+
+    /** Remember one memory-tool call until its result says whether it settled. */
+    function receiptCall(state, event) {
+      const name = event.data.name
+      if (typeof name !== 'string' || !name.startsWith('memory_')) return state
+      const args = parsedArguments(event.data.arguments)
+      if (args === null) return state
+      const calls = new Map(state.calls)
+      calls.set(String(event.data.callId), { name, args })
+      return { ...state, calls }
+    }
+
+    /** Commit one settled memory call; failed or interrupted calls contribute nothing. */
+    function memoryReceiptResult(state, event) {
+      const callId = String(event.data.message.source.callId)
+      const call = state.calls.get(callId)
+      if (call === undefined) return state
+      const calls = new Map(state.calls)
+      calls.delete(callId)
+      const next = { ...state, calls }
+      if (event.data.message.isError === true) return next
+      const args = call.args
+      const action = typeof args.action === 'string' ? args.action : ''
+      if (call.name === 'memory_write') {
+        if (action === 'add') {
+          const title = typeof args.title === 'string' ? args.title.trim() : ''
+          if (title === '') return next
+          const type = TYPE_ORDER.includes(args.type) ? args.type : ''
+          return { ...next, wrote: [...next.wrote, { title: title.slice(0, 120), type }] }
+        }
+        if (action === 'update') return { ...next, updated: next.updated + 1 }
+        if (action === 'delete') return { ...next, deleted: next.deleted + 1 }
+        return next
+      }
+      if (call.name === 'memory_verify') return { ...next, verified: next.verified + 1 }
+      if (call.name === 'memory_stale') {
+        if (action === 'mark') return { ...next, staled: next.staled + 1 }
+        if (action === 'resolve') return { ...next, resolved: next.resolved + 1 }
+        return next
+      }
+      if (call.name !== 'memory_propose') return next
+      if (action === 'resolve') {
+        const proposal = typeof args.proposal === 'string' ? args.proposal : ''
+        const index = next.proposals.findIndex((entry) => sameProposal(entry.file, proposal))
+        if (index === -1) return { ...next, applied: next.applied + 1 }
+        const proposals = [...next.proposals]
+        proposals.splice(index, 1)
+        return { ...next, proposals, applied: next.applied + 1 }
+      }
+      const title = typeof args.title === 'string' ? args.title.trim() : ''
+      if (title === '') return next
+      return {
+        ...next,
+        proposals: [...next.proposals, { title: title.slice(0, 120), file: proposalFile(event.data.message) }],
+      }
+    }
+
+    /**
+     * One Turn's memory activity, folded from its durable `tool/call` events so
+     * Session replay reproduces the receipt with no Host state; failed or
+     * interrupted calls contribute nothing.
+     */
+    const memoryTurnDefinition = {
+      kind: RECEIPT_KEY,
+      match(event) {
+        if (event.type === 'turn/start') return { id: String(event.data.turn), role: 'start' }
+        if (event.type === 'tool/call' && typeof event.data.name === 'string' && event.data.name.startsWith('memory_')) {
+          return { id: String(event.data.turn), role: 'update' }
+        }
+        if (event.type === 'tool/result') return { id: String(event.data.turn), role: 'update' }
+        return null
+      },
+      start(_context, match) {
+        if (match.event.type !== 'turn/start') throw new Error('memory receipt requires turn/start')
+        return {
+          turn: match.event.data.turn,
+          calls: new Map(),
+          wrote: [],
+          proposals: [],
+          updated: 0,
+          deleted: 0,
+          verified: 0,
+          staled: 0,
+          resolved: 0,
+          applied: 0,
+        }
+      },
+      update(context, match) {
+        if (match.event.type === 'tool/call') return receiptCall(context.state, match.event)
+        if (match.event.type === 'tool/result') return memoryReceiptResult(context.state, match.event)
+        return context.state
+      },
+      buildLocationData(context, scope, previous) {
+        if (scope !== 'turn' || context.state === undefined) return null
+        const state = context.state
+        const empty = state.wrote.length === 0 && state.proposals.length === 0
+          && state.updated === 0 && state.deleted === 0 && state.verified === 0
+          && state.staled === 0 && state.resolved === 0 && state.applied === 0
+        if (empty) return null
+        const value = {
+          wrote: state.wrote,
+          proposals: state.proposals,
+          updated: state.updated,
+          deleted: state.deleted,
+          verified: state.verified,
+          staled: state.staled,
+          resolved: state.resolved,
+          applied: state.applied,
+        }
+        const same = previous !== null && previous !== undefined
+          && previous.kind === 'turn'
+          && previous.turn === state.turn
+          && previous.key === RECEIPT_KEY
+          && previous.value.wrote === value.wrote
+          && previous.value.proposals === value.proposals
+          && previous.value.updated === value.updated
+          && previous.value.deleted === value.deleted
+          && previous.value.verified === value.verified
+          && previous.value.staled === value.staled
+          && previous.value.resolved === value.resolved
+          && previous.value.applied === value.applied
+        if (same) return previous
+        return { kind: 'turn', turn: state.turn, key: RECEIPT_KEY, value }
+      },
+    }
+
+    /** One line: what this Turn changed in memory, proposals first. */
+    function receiptSummary(t, value) {
+      const parts = []
+      if (value.proposals.length === 1) parts.push(value.proposals[0].title)
+      else if (value.proposals.length > 1) parts.push(formatText(t, 'receiptProposals', { n: value.proposals.length }))
+      if (value.wrote.length > 0) parts.push(formatText(t, 'receiptWrote', { n: value.wrote.length }))
+      if (value.updated > 0) parts.push(formatText(t, 'receiptUpdated', { n: value.updated }))
+      if (value.verified > 0) parts.push(formatText(t, 'receiptVerified', { n: value.verified }))
+      if (value.deleted > 0) parts.push(formatText(t, 'receiptDeleted', { n: value.deleted }))
+      if (value.staled > 0) parts.push(formatText(t, 'receiptStale', { n: value.staled }))
+      if (value.applied > 0) parts.push(formatText(t, 'receiptApplied', { n: value.applied }))
+      return parts.join(' · ')
+    }
+
+    /**
+     * Turn-tail receipt, downgraded to a plain activity summary: the unified
+     * pending-decisions row (in the pm-board plugin) owns reminding about
+     * proposals, so this line only reports what the Turn changed in memory. A
+     * Turn that only read memory renders nothing. One click opens the page.
+     */
+    function MemoryTurnRow(props) {
+      const value = props.turn === undefined ? undefined : props.turn.data.get(RECEIPT_KEY)
+      if (value === undefined) return null
+      const t = props.t
+      return h(
+        React.Fragment,
+        null,
+        h('style', { key: 'style' }, MEM_RECEIPT_CSS),
+        h(
+          'div',
+          { key: 'receipt', className: 'mem-receipt' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'mem-receipt-head',
+              title: t('receiptOpen'),
+              onClick: () => { props.openMemory() },
+            },
+            h('span', { className: 'mem-receipt-label' }, t('receiptLabel')),
+            h('span', { className: 'mem-receipt-summary' }, receiptSummary(t, value)),
+          ),
+        ),
+      )
+    }
+
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'uiConversation', 'layout'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'memory: dictionaries')
         const t = ctx.locale.bind(NS)
+        // The panel is wrapped so a single failing row cannot blank the window.
+        const MemoryPanel = (props) => h(
+          PanelBoundary,
+          { message: props.t('panelFailed') },
+          h(MemoryPage, props),
+        )
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',
           key: PANEL_ID,
           locale: NS,
           inject: () => ({ t }),
-        }, MemoryPage))
+        }, MemoryPanel))
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
           id: PANEL_ID,
@@ -1106,8 +1406,32 @@ window.__ModuleLoader__.load({
           label: () => t('panel'),
           locale: NS,
         }, MemoryIcon))
+        // The receipt's only destination: the memory page, without hunting for the sidebar icon.
+        const openMemory = () => {
+          try {
+            ctx.layout.selectPanel(PANEL_ID)
+          } catch (error) {
+            console.warn('memory: cannot open the memory panel:', error)
+          }
+        }
+        // The turn-end receipt is derived from the Session log, so it also fills in
+        // for turns recorded before this version was installed.
+        ctx.effect(() => ctx.uiConversation.events.register(memoryTurnDefinition), 'memory: turn receipt')
+        ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+          name: 'conversation.chat.turnTail',
+          id: RECEIPT_KEY,
+          order: 15,
+          locale: NS,
+          inject: () => ({ openMemory }),
+        }, MemoryTurnRow))
       },
-      __test: { formatText, typeLabel, keyOf },
+      __test: {
+        formatText,
+        typeLabel,
+        keyOf,
+        receipt: { definition: memoryTurnDefinition, summary: receiptSummary, component: MemoryTurnRow },
+        list: { stale: StaleList, staleRow: StaleRow, proposal: ProposalList, proposalRow: ProposalRow },
+      },
     }
   },
 })
